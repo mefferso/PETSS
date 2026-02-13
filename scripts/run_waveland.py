@@ -30,7 +30,6 @@ def main():
         logger.warning(f"{STATIONS_FILE} not found. Using defaults.")
         config = {"stations": [{"id": WAVELAND_ID}]}
 
-    # Filter for Waveland (or iterate all if you expand later)
     target_station = next((s for s in config['stations'] if str(s['id']) == WAVELAND_ID), None)
     if not target_station:
         raise ValueError(f"Station {WAVELAND_ID} not found in config.")
@@ -41,7 +40,6 @@ def main():
     logger.info("Fetching flood levels...")
     levels = coops_api.fetch_flood_levels(WAVELAND_ID)
     
-    # Use YAML overrides if API failed or manual override exists
     if not levels.minor: 
         levels.minor = 1.6 # Approximate Waveland minor if API missing
     logger.info(f"Thresholds: Minor={levels.minor}, Mod={levels.moderate}, Major={levels.major}")
@@ -56,12 +54,18 @@ def main():
     all_csvs = petss_web_fetch.extract_csvs_from_tarball(tar_bytes)
     
     logger.info(f"Parsing series for {WAVELAND_ID}...")
-    # This returns a DataFrame with columns: [station_id, valid_time, member, stormtide_ft]
     df_petss = coops_fetch.extract_station_series(all_csvs, WAVELAND_ID)
 
+    # --- CRITICAL CHECK ---
+    if df_petss.empty:
+        logger.error(f"No data found for station {WAVELAND_ID} in any downloaded CSV.")
+        logger.error("Possible reasons: Station ID mismatch, station not in this PETSS cycle, or parsing error.")
+        # Exit cleanly to prevent crash
+        return
+    
+    logger.info(f"Found {len(df_petss)} data points.")
+
     # 4. Bias Correction
-    # Strategy: Fetch last 24h observed data. Compare most recent observation 
-    # to the PETSS mean at that specific time.
     bias_path = os.path.join(BIAS_DIR, f"bias_{WAVELAND_ID}.json")
     bias_state = compute.load_bias(bias_path)
     
@@ -73,37 +77,25 @@ def main():
         logger.info("Fetching recent observed water levels for bias calculation...")
         obs_data = coops_api.fetch_recent_water_levels(WAVELAND_ID, yesterday_str, today_str)
         
-        # Convert observations to DataFrame
         obs_list = obs_data.get('data', [])
         if obs_list:
             df_obs = pd.DataFrame(obs_list)
             df_obs['t'] = pd.to_datetime(df_obs['t']).dt.tz_localize('UTC') # API returns GMT
             df_obs['v'] = pd.to_numeric(df_obs['v'], errors='coerce')
             
-            # Find the latest observation
             last_obs = df_obs.iloc[-1]
             last_obs_time = last_obs['t']
             last_obs_val = last_obs['v']
 
-            # Find PETSS mean at that time (interpolate or nearest hour)
-            # PETSS is usually hourly. Let's find the nearest hour in PETSS df
-            # Calculate mean of ensemble first
             df_mean = df_petss.groupby('valid_time')['stormtide_ft'].mean()
             
-            # Get model value at observation time (using nearest for simplicity)
-            # Ensure indices are timezone aware and compatible
             idx_loc = df_mean.index.get_indexer([last_obs_time], method='nearest')
             if idx_loc[0] != -1:
                 model_time = df_mean.index[idx_loc[0]]
                 model_val = df_mean.iloc[idx_loc[0]]
                 
-                # Only update bias if the time difference is small (< 90 mins)
                 if abs((model_time - last_obs_time).total_seconds()) < 5400:
-                    # Bias = Forecast - Observed
-                    # If model is 2.0 and obs is 2.5, Bias is -0.5. 
-                    # Corrected = Forecast - (-0.5) = 2.5. Correct.
                     current_error = model_val - last_obs_val
-                    
                     logger.info(f"Updating Bias. Model: {model_val:.2f}, Obs: {last_obs_val:.2f} (diff: {current_error:.2f})")
                     bias_state = compute.update_bias(bias_state, current_error)
                     compute.save_bias(bias_path, bias_state)
@@ -119,12 +111,15 @@ def main():
     df_petss['stormtide_ft'] = df_petss['stormtide_ft'] - bias_state.rolling_bias_ft
 
     # 6. Compute Exceedance Probabilities
-    # Ensure thresholds are not None
     t_min = levels.minor if levels.minor else 1.6
-    t_mod = levels.moderate if levels.moderate else 2.5 # Default fallback
-    t_maj = levels.major if levels.major else 4.0     # Default fallback
+    t_mod = levels.moderate if levels.moderate else 2.5
+    t_maj = levels.major if levels.major else 4.0
 
     stats = coops_fetch.compute_exceedance_probs(df_petss, t_min, t_mod, t_maj)
+    
+    if stats.empty:
+         logger.warning("Forecast stats table is empty. Skipping output generation.")
+         return
 
     # 7. Generate Output
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -139,8 +134,15 @@ def main():
     
     start_win, end_win, peak_time = coops_fetch.pick_peak_window(stats, min_prob=30.0)
     
-    peak_row = stats.loc[stats['mean_ft'].idxmax()]
-    
+    # Handle case where peak_time might be None
+    if not peak_time:
+         logger.warning("No peak time found (probablities too low?). Using max mean.")
+         peak_idx = stats['mean_ft'].idxmax()
+         peak_row = stats.loc[peak_idx]
+    else:
+         # Find row matching peak time
+         peak_row = stats[stats['valid_time'].dt.strftime('%Y-%m-%dT%H:%M:%SZ') == peak_time].iloc[0]
+
     with open(md_path, "w") as f:
         f.write(f"# Waveland, MS Flood Forecast\n\n")
         f.write(f"**Updated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n")
