@@ -48,7 +48,7 @@ def main():
     url = build_petss_url(stid=stid, datum=datum, show=show)
     print(f"Fetching PETSS page: {url}")
 
-    raw_text = fetch_petss_table_text(url)
+    raw_text = fetch_petss_table_text(station_id)
     rows = parse_petss_csv_text(raw_text)
 
     df = pd.DataFrame(rows)
