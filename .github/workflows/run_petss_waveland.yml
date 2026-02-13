@@ -23,16 +23,26 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Run engine
         run: |
+          # Ensure scripts is treated as a module
           python -m scripts.run_waveland
 
       - name: Commit outputs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add outputs data/bias
-          git commit -m "Update Waveland PETSS coastal intel" || echo "No changes to commit"
-          git push
+          
+          # Add directories if they exist
+          git add outputs/* || true
+          git add data/bias/* || true
+          
+          # Only commit if there are changes
+          if [[ -n $(git status -s) ]]; then
+            git commit -m "Update Waveland PETSS coastal intel [skip ci]"
+            git push
+          else
+            echo "No changes to commit"
+          fi
