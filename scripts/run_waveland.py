@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from .coops_api import fetch_flood_levels, fetch_recent_water_levels
-from .petss_fetch import (
-    find_latest_petss_csv_tar,
-    download_csv_tarball,
-    extract_csvs_from_tarball,
-)
-
-except Exception:
-    # Fallback if you ever move modules to repo root
-    from coops_api import fetch_flood_levels, fetch_recent_water_levels
-    from petss_fetch import (
+try:
+    from .coops_api import fetch_flood_levels, fetch_recent_water_levels
+    from .petss_fetch import (
         find_latest_petss_csv_tar,
         download_csv_tarball,
         extract_csvs_from_tarball,
     )
+except Exception:
+    from scripts.coops_api import fetch_flood_levels, fetch_recent_water_levels
+    from scripts.petss_fetch import (
+        find_latest_petss_csv_tar,
+        download_csv_tarball,
+        extract_csvs_from_tarball,
+    )
+
 
 import json
 from dataclasses import asdict
