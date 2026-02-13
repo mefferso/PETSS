@@ -18,7 +18,7 @@
     .k { color:#555; }
     .v { font-variant-numeric: tabular-nums; }
     .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#f3f4f6; font-size: 12px; }
-    .err { color:#b00020; font-size: 13px; white-space: pre-wrap; }
+    .err { color:#b00020; font-size: 13px; white-space: pre-wrap; margin-top: 10px; }
     .small { font-size: 12px; color:#666; margin-top: 10px; }
     @media (max-width: 760px){ .grid { grid-template-columns: 1fr; } .kv { grid-template-columns: 120px 1fr; } }
   </style>
@@ -50,180 +50,167 @@
 </div>
 
 <script>
-/**
- * CONFIG YOU MUST SET
- * 1) Your GitHub user/org name
- * 2) Repo name
- * 3) Branch
- * 4) PETSS file name you want (from outputs/petss_raw/.../<cycle>/XXXXXXX.csv)
- */
-const GITHUB_USER = "mefferso";      // <-- change if needed
-const REPO_NAME   = "PETSS";         // <-- change if needed
-const BRANCH      = "main";
-const PETSS_FILE_NAME = "8410140.csv"; // <-- this is the one you showed in the screenshot
+  // ==== CONFIG ====
+  const GITHUB_USER = "mefferso";
+  const REPO_NAME   = "PETSS";
+  const BRANCH      = "main";
+  const LATEST_JSON_PATH = "outputs/waveland/latest.json";
 
-// Where your workflow writes raw PETSS csvs:
-// outputs/petss_raw/petss_YYYYMMDD/t??z/<PETSS_FILE_NAME>
-//
-// We’ll discover the latest run directory by reading outputs/waveland/latest.json.
-const LATEST_JSON_PATH = "outputs/waveland/latest.json";
-
-function rawUrl(path) {
-  // Use raw.githubusercontent.com for direct file fetch
-  return `https://raw.githubusercontent.com/${GITHUB_USER}/${REPO_NAME}/${BRANCH}/${path}`;
-}
-
-function fmtNum(x) {
-  if (x == null || Number.isNaN(x)) return "—";
-  return Number(x).toFixed(3);
-}
-
-function fmtTime(d) {
-  if (!(d instanceof Date) || isNaN(d.getTime())) return "—";
-  return d.toISOString().replace("T"," ").replace(":00.000Z","Z");
-}
-
-function parsePetssTime(s) {
-  // TIME like 202602080600 (YYYYMMDDHHMM)
-  const str = String(s).trim();
-  if (!/^\d{12}$/.test(str)) return null;
-  const Y = +str.slice(0,4);
-  const M = +str.slice(4,6);
-  const D = +str.slice(6,8);
-  const h = +str.slice(8,10);
-  const m = +str.slice(10,12);
-  // treat as UTC
-  return new Date(Date.UTC(Y, M-1, D, h, m, 0));
-}
-
-function parseCsv(text) {
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.trim());
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",").map(c => c.trim());
-    if (cols.length !== headers.length) continue;
-    const obj = {};
-    for (let j = 0; j < headers.length; j++) obj[headers[j]] = cols[j];
-    rows.push(obj);
+  function rawUrl(path) {
+    return `https://raw.githubusercontent.com/${GITHUB_USER}/${REPO_NAME}/${BRANCH}/${path}`;
   }
-  return rows;
-}
 
-function toFloat(val) {
-  const x = Number(val);
-  // PETSS missing sentinel looks like 9999.000
-  if (!isFinite(x)) return null;
-  if (Math.abs(x - 9999) < 0.0005) return null;
-  return x;
-}
-
-function rowHasValid(row) {
-  // consider a row valid if TWL or OB exists
-  const twl = toFloat(row.TWL);
-  const ob  = toFloat(row.OB);
-  return twl != null || ob != null;
-}
-
-function pickLatestValid(rows) {
-  // rows are assumed chronological; pick last valid
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (rowHasValid(rows[i])) return rows[i];
+  function fmtNum(x) {
+    if (x == null || Number.isNaN(x)) return "—";
+    return Number(x).toFixed(3);
   }
-  return null;
-}
 
-function pickClosestTo(rows, targetDate) {
-  let best = null;
-  let bestDt = Infinity;
-  for (const r of rows) {
-    if (!rowHasValid(r)) continue;
-    const d = parsePetssTime(r.TIME);
-    if (!d) continue;
-    const dt = Math.abs(d.getTime() - targetDate.getTime());
-    if (dt < bestDt) { best = r; bestDt = dt; }
+  function fmtTime(d) {
+    if (!(d instanceof Date) || isNaN(d.getTime())) return "—";
+    return d.toISOString().replace("T"," ").replace(":00.000Z","Z");
   }
-  return best;
-}
 
-function renderCard(el, row, label) {
-  if (!row) {
-    el.innerHTML = `<div class="k">No valid data</div><div class="v">—</div>`;
-    return;
+  function parsePetssTime(s) {
+    // TIME like 202602080600 (YYYYMMDDHHMM)
+    const str = String(s).trim();
+    if (!/^\d{12}$/.test(str)) return null;
+    const Y = +str.slice(0,4);
+    const M = +str.slice(4,6);
+    const D = +str.slice(6,8);
+    const h = +str.slice(8,10);
+    const m = +str.slice(10,12);
+    return new Date(Date.UTC(Y, M-1, D, h, m, 0));
   }
-  const d = parsePetssTime(row.TIME);
 
-  const fields = [
-    ["Time (UTC)", fmtTime(d)],
-    ["Tide (ft)", fmtNum(toFloat(row.TIDE))],
-    ["Obs (ft)", fmtNum(toFloat(row.OB))],
-    ["Surge (ft)", fmtNum(toFloat(row.SURGE))],
-    ["Bias (ft)", fmtNum(toFloat(row.BIAS))],
-    ["TWL (ft)", fmtNum(toFloat(row.TWL))],
-    ["Surge 90p (ft)", fmtNum(toFloat(row.SURGE90p))],
-    ["TWL 90p (ft)", fmtNum(toFloat(row.TWL90p))],
-    ["Surge 10p (ft)", fmtNum(toFloat(row.SURGE10p))],
-    ["TWL 10p (ft)", fmtNum(toFloat(row.TWL10p))],
-  ];
-
-  el.innerHTML = fields.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
-}
-
-async function main() {
-  const status = document.getElementById("status");
-  const meta   = document.getElementById("meta");
-  const foot   = document.getElementById("foot");
-  const errEl  = document.getElementById("err");
-
-  try {
-    status.textContent = "Loading latest.json";
-    const latest = await fetch(rawUrl(LATEST_JSON_PATH), { cache: "no-store" }).then(r => {
-      if (!r.ok) throw new Error(`latest.json fetch failed: ${r.status}`);
-      return r.json();
-    });
-
-    const run = latest?.petss_latest;
-    const station = latest?.station;
-    const rawFiles = run?.raw_files_written || [];
-    const generated = latest?.generated_utc || "—";
-
-    meta.textContent = `${station?.name || "Station"} • PETSS cycle t${run?.cycle || "??"}z • updated ${generated}`;
-    status.textContent = "Finding CSV";
-
-    // Find the newest raw CSV path that matches PETSS_FILE_NAME
-    const matchPath = rawFiles.find(p => p.endsWith("/" + PETSS_FILE_NAME) || p.endsWith("\\" + PETSS_FILE_NAME));
-    if (!matchPath) {
-      throw new Error(`Could not find ${PETSS_FILE_NAME} in latest.json raw_files_written.\n` +
-                      `Set PETSS_FILE_NAME to one of the files in outputs/petss_raw/... (like 8410140.csv).`);
+  function parseCsv(text) {
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (lines.length < 2) return [];
+    const headers = lines[0].split(",").map(h => h.trim());
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(",").map(c => c.trim());
+      if (cols.length !== headers.length) continue;
+      const obj = {};
+      for (let j = 0; j < headers.length; j++) obj[headers[j]] = cols[j];
+      rows.push(obj);
     }
-
-    status.textContent = "Downloading CSV";
-    const csvText = await fetch(rawUrl(matchPath), { cache: "no-store" }).then(r => {
-      if (!r.ok) throw new Error(`CSV fetch failed: ${r.status} for ${matchPath}`);
-      return r.text();
-    });
-
-    const rows = parseCsv(csvText);
-    if (!rows.length) throw new Error("CSV parsed zero rows.");
-
-    const current = pickLatestValid(rows);
-    const currentTime = current ? parsePetssTime(current.TIME) : null;
-    const plus24Target = currentTime ? new Date(currentTime.getTime() + 24*60*60*1000) : null;
-    const plus24 = plus24Target ? pickClosestTo(rows, plus24Target) : null;
-
-    renderCard(document.getElementById("nowCard"), current, "Current");
-    renderCard(document.getElementById("plus24Card"), plus24, "+24h");
-
-    foot.textContent = `Source: ${matchPath} (9999 treated as missing)`;
-    status.textContent = "OK";
-  } catch (e) {
-    status.textContent = "ERROR";
-    errEl.textContent = String(e?.stack || e);
+    return rows;
   }
-}
 
-main();
+  function toFloat(val) {
+    const x = Number(val);
+    if (!isFinite(x)) return null;
+    // PETSS missing sentinel often 9999.000
+    if (Math.abs(x - 9999) < 0.0005) return null;
+    return x;
+  }
+
+  function rowHasValid(row) {
+    const twl = toFloat(row.TWL);
+    const ob  = toFloat(row.OB);
+    return twl != null || ob != null;
+  }
+
+  function pickLatestValid(rows) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rowHasValid(rows[i])) return rows[i];
+    }
+    return null;
+  }
+
+  function pickClosestFutureTo(rows, targetDate) {
+    let best = null;
+    let bestDt = Infinity;
+    for (const r of rows) {
+      if (!rowHasValid(r)) continue;
+      const d = parsePetssTime(r.TIME);
+      if (!d) continue;
+      if (d.getTime() < targetDate.getTime()) continue; // future only
+      const dt = d.getTime() - targetDate.getTime();
+      if (dt < bestDt) { best = r; bestDt = dt; }
+    }
+    return best;
+  }
+
+  function renderCard(el, row) {
+    if (!row) {
+      el.innerHTML = `<div class="k">No valid data</div><div class="v">—</div>`;
+      return;
+    }
+    const d = parsePetssTime(row.TIME);
+
+    const fields = [
+      ["Time (UTC)", fmtTime(d)],
+      ["Tide (ft)", fmtNum(toFloat(row.TIDE))],
+      ["Obs (ft)", fmtNum(toFloat(row.OB))],
+      ["Surge (ft)", fmtNum(toFloat(row.SURGE))],
+      ["Bias (ft)", fmtNum(toFloat(row.BIAS))],
+      ["TWL (ft)", fmtNum(toFloat(row.TWL))],
+      ["Surge 90p (ft)", fmtNum(toFloat(row.SURGE90p))],
+      ["TWL 90p (ft)", fmtNum(toFloat(row.TWL90p))],
+      ["Surge 10p (ft)", fmtNum(toFloat(row.SURGE10p))],
+      ["TWL 10p (ft)", fmtNum(toFloat(row.TWL10p))],
+    ];
+
+    el.innerHTML = fields.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
+  }
+
+  async function main() {
+    const status = document.getElementById("status");
+    const meta   = document.getElementById("meta");
+    const foot   = document.getElementById("foot");
+    const errEl  = document.getElementById("err");
+
+    try {
+      status.textContent = "Loading latest.json";
+      const latest = await fetch(rawUrl(LATEST_JSON_PATH), { cache: "no-store" }).then(r => {
+        if (!r.ok) throw new Error(`latest.json fetch failed: ${r.status}`);
+        return r.json();
+      });
+
+      const station = latest?.station || {};
+      const run = latest?.petss_latest || {};
+      const generated = latest?.generated_utc || "—";
+
+      const stationCsvPath = latest?.petss_station_csv?.path;
+      const stationCsvSource = latest?.petss_station_csv?.source_file;
+
+      if (!stationCsvPath) {
+        throw new Error("latest.json missing petss_station_csv.path (Python didn't write station CSV)");
+      }
+
+      meta.textContent = `${station?.name || "Station"} • PETSS cycle t${run?.cycle || "??"}z • updated ${generated}`;
+      status.textContent = "Downloading station CSV";
+
+      const csvText = await fetch(rawUrl(stationCsvPath), { cache: "no-store" }).then(r => {
+        if (!r.ok) throw new Error(`CSV fetch failed: ${r.status} for ${stationCsvPath}`);
+        return r.text();
+      });
+
+      const rows = parseCsv(csvText);
+      if (!rows.length) throw new Error(`Station CSV parsed zero rows: ${stationCsvPath}`);
+
+      const current = pickLatestValid(rows);
+      const currentTime = current ? parsePetssTime(current.TIME) : null;
+
+      const plus24Target = currentTime ? new Date(currentTime.getTime() + 24*60*60*1000) : null;
+      const plus24 = plus24Target ? pickClosestFutureTo(rows, plus24Target) : null;
+
+      renderCard(document.getElementById("nowCard"), current);
+      renderCard(document.getElementById("plus24Card"), plus24);
+
+      foot.textContent = `Source: ${stationCsvPath}` +
+                         (stationCsvSource ? ` (from ${stationCsvSource})` : "") +
+                         ` • 9999 treated as missing`;
+
+      status.textContent = "OK";
+    } catch (e) {
+      status.textContent = "ERROR";
+      errEl.textContent = String(e?.stack || e);
+    }
+  }
+
+  main();
 </script>
 </body>
 </html>
