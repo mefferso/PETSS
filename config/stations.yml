@@ -1,0 +1,6 @@
+stations:
+  - id: "8747437"
+    name: "Waveland, MS (Bay Waveland Yacht Club)"
+    coops_datum: "MLLW"
+    coops_time_zone: "gmt"
+    thresholds_override_ft: null
