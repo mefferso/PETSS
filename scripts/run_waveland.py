@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 
-# Internal imports (assumes running as python -m scripts.run_waveland)
+# Internal imports
 from scripts import petss_web_fetch
 from scripts import coops_fetch
 from scripts import coops_api
@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 STATIONS_FILE = "stations.yml"
 BIAS_DIR = "data/bias"
 OUTPUT_DIR = "outputs"
-WAVELAND_ID = "8747437" # Hardcoded backup or primary target
+# We default to Waveland IDs if config is missing
+DEFAULT_COOPS_ID = "8747437"
+DEFAULT_PETSS_ID = "WVLM6"
 
 def main():
     # 1. Load Configuration
@@ -28,23 +30,29 @@ def main():
             config = yaml.safe_load(f)
     else:
         logger.warning(f"{STATIONS_FILE} not found. Using defaults.")
-        config = {"stations": [{"id": WAVELAND_ID}]}
+        config = {"stations": [{"id": DEFAULT_COOPS_ID, "petss_id": DEFAULT_PETSS_ID}]}
 
-    target_station = next((s for s in config['stations'] if str(s['id']) == WAVELAND_ID), None)
-    if not target_station:
-        raise ValueError(f"Station {WAVELAND_ID} not found in config.")
+    # Find configuration for our target station
+    station_cfg = next((s for s in config['stations'] if str(s['id']) == DEFAULT_COOPS_ID), None)
+    if not station_cfg:
+        # Fallback if the specific ID isn't in the YAML
+        station_cfg = {"id": DEFAULT_COOPS_ID, "petss_id": DEFAULT_PETSS_ID}
+    
+    coops_id = str(station_cfg['id'])
+    # Use petss_id if it exists, otherwise fallback to coops_id
+    petss_id = str(station_cfg.get('petss_id', coops_id))
 
-    logger.info(f"Starting workflow for {target_station['id']}")
+    logger.info(f"Starting workflow for CO-OPS: {coops_id} | PETSS: {petss_id}")
 
-    # 2. Fetch Flood Thresholds
+    # 2. Fetch Flood Thresholds (Uses CO-OPS Numeric ID)
     logger.info("Fetching flood levels...")
-    levels = coops_api.fetch_flood_levels(WAVELAND_ID)
+    levels = coops_api.fetch_flood_levels(coops_id)
     
     if not levels.minor: 
-        levels.minor = 1.6 # Approximate Waveland minor if API missing
+        levels.minor = 1.6 
     logger.info(f"Thresholds: Minor={levels.minor}, Mod={levels.moderate}, Major={levels.major}")
 
-    # 3. Download and Parse PETSS Data
+    # 3. Download and Parse PETSS Data (Uses NWS String ID)
     logger.info("Finding latest PETSS tarball...")
     run_ref = petss_web_fetch.find_latest_petss_csv_tar()
     logger.info(f"Downloading {run_ref.csv_tar_url}...")
@@ -53,20 +61,18 @@ def main():
     logger.info("Extracting CSVs...")
     all_csvs = petss_web_fetch.extract_csvs_from_tarball(tar_bytes)
     
-    logger.info(f"Parsing series for {WAVELAND_ID}...")
-    df_petss = coops_fetch.extract_station_series(all_csvs, WAVELAND_ID)
+    logger.info(f"Parsing series for PETSS ID: {petss_id}...")
+    df_petss = coops_fetch.extract_station_series(all_csvs, petss_id)
 
-    # --- CRITICAL CHECK ---
     if df_petss.empty:
-        logger.error(f"No data found for station {WAVELAND_ID} in any downloaded CSV.")
-        logger.error("Possible reasons: Station ID mismatch, station not in this PETSS cycle, or parsing error.")
-        # Exit cleanly to prevent crash
-        return
+        logger.error(f"No data found for station {petss_id} in any downloaded CSV.")
+        logger.error("Check station ID mapping or PETSS availability.")
+        return # Exit gracefully
     
     logger.info(f"Found {len(df_petss)} data points.")
 
-    # 4. Bias Correction
-    bias_path = os.path.join(BIAS_DIR, f"bias_{WAVELAND_ID}.json")
+    # 4. Bias Correction (Uses CO-OPS Observed Data)
+    bias_path = os.path.join(BIAS_DIR, f"bias_{coops_id}.json")
     bias_state = compute.load_bias(bias_path)
     
     now_utc = datetime.now(timezone.utc)
@@ -74,13 +80,13 @@ def main():
     today_str = now_utc.strftime("%Y%m%d")
     
     try:
-        logger.info("Fetching recent observed water levels for bias calculation...")
-        obs_data = coops_api.fetch_recent_water_levels(WAVELAND_ID, yesterday_str, today_str)
+        logger.info(f"Fetching recent observed water levels for {coops_id}...")
+        obs_data = coops_api.fetch_recent_water_levels(coops_id, yesterday_str, today_str)
         
         obs_list = obs_data.get('data', [])
         if obs_list:
             df_obs = pd.DataFrame(obs_list)
-            df_obs['t'] = pd.to_datetime(df_obs['t']).dt.tz_localize('UTC') # API returns GMT
+            df_obs['t'] = pd.to_datetime(df_obs['t']).dt.tz_localize('UTC') 
             df_obs['v'] = pd.to_numeric(df_obs['v'], errors='coerce')
             
             last_obs = df_obs.iloc[-1]
@@ -101,16 +107,14 @@ def main():
                     compute.save_bias(bias_path, bias_state)
                 else:
                     logger.warning("Gap between model and observation too large to update bias.")
-            else:
-                logger.warning("Could not align model time with observation time.")
     except Exception as e:
-        logger.error(f"Failed to update bias: {e}")
+        logger.error(f"Bias update failed (continuing without update): {e}")
 
-    # 5. Apply Bias to Forecast
+    # 5. Apply Bias
     logger.info(f"Applying rolling bias: {bias_state.rolling_bias_ft:.2f} ft")
     df_petss['stormtide_ft'] = df_petss['stormtide_ft'] - bias_state.rolling_bias_ft
 
-    # 6. Compute Exceedance Probabilities
+    # 6. Compute Stats
     t_min = levels.minor if levels.minor else 1.6
     t_mod = levels.moderate if levels.moderate else 2.5
     t_maj = levels.major if levels.major else 4.0
@@ -118,29 +122,24 @@ def main():
     stats = coops_fetch.compute_exceedance_probs(df_petss, t_min, t_mod, t_maj)
     
     if stats.empty:
-         logger.warning("Forecast stats table is empty. Skipping output generation.")
+         logger.warning("Forecast stats empty. Skipping output.")
          return
 
     # 7. Generate Output
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # Save Raw Data
     output_json = os.path.join(OUTPUT_DIR, "waveland_forecast.json")
     stats['valid_time_str'] = stats['valid_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
     stats.to_json(output_json, orient="records", date_format="iso", indent=2)
     
-    # Generate Markdown Summary
     md_path = os.path.join(OUTPUT_DIR, "README.md")
     
     start_win, end_win, peak_time = coops_fetch.pick_peak_window(stats, min_prob=30.0)
     
-    # Handle case where peak_time might be None
     if not peak_time:
-         logger.warning("No peak time found (probablities too low?). Using max mean.")
          peak_idx = stats['mean_ft'].idxmax()
          peak_row = stats.loc[peak_idx]
     else:
-         # Find row matching peak time
          peak_row = stats[stats['valid_time'].dt.strftime('%Y-%m-%dT%H:%M:%SZ') == peak_time].iloc[0]
 
     with open(md_path, "w") as f:
