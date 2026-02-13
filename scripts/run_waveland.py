@@ -1,14 +1,33 @@
+# scripts/run_waveland.py
+
 from __future__ import annotations
 
+# Robust imports: prefer package-relative, fall back if you moved files differently
+try:
+    from .coops_api import fetch_flood_levels, fetch_recent_water_levels
+    from .petss_fetch import (
+        find_latest_petss_csv_tar,
+        download_csv_tarball,
+        extract_csvs_from_tarball,
+    )
+except Exception:
+    # fallback if modules are at repo root
+    from coops_api import fetch_flood_levels, fetch_recent_water_levels
+    from petss_fetch import (
+        find_latest_petss_csv_tar,
+        download_csv_tarball,
+        extract_csvs_from_tarball,
+    )
+
 import json
-import os
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import yaml
+
 
 from coops_api import fetch_flood_levels, fetch_recent_water_levels
 from petss_fetch import find_latest_petss_csv_tar, download_csv_tarball, extract_csvs_from_tarball
