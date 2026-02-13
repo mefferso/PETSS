@@ -1,247 +1,165 @@
-from __future__ import annotations
-
-import json
 import os
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any
-
-import pandas as pd
+import json
 import yaml
+import logging
+from datetime import datetime, timedelta, timezone
+import pandas as pd
 
-from scripts.coops_fetch import fetch_flood_levels, fetch_recent_water_levels
-from scripts.bias import load_bias, save_bias, update_bias
-from scripts.petss_web_fetch import fetch_petss_table_text, parse_petss_csv_text
+# Internal imports (assumes running as python -m scripts.run_waveland)
+from scripts import petss_web_fetch
+from scripts import coops_fetch
+from scripts import coops_api
+from scripts import compute
 
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def _utc_now():
-    return datetime.now(timezone.utc)
-
-
-def _yyyymmdd(dt: datetime) -> str:
-    return dt.strftime("%Y%m%d")
-
-
-def _coops_obs_to_df(j: Dict[str, Any]) -> pd.DataFrame:
-    data = j.get("data", [])
-    df = pd.DataFrame(data)
-    if df.empty:
-        return df
-    df["t"] = pd.to_datetime(df["t"], utc=True, errors="coerce")
-    df["v"] = pd.to_numeric(df["v"], errors="coerce")
-    df = df.dropna(subset=["t", "v"]).sort_values("t")
-    return df
-
+# Config
+STATIONS_FILE = "stations.yml"
+BIAS_DIR = "data/bias"
+OUTPUT_DIR = "outputs"
+WAVELAND_ID = "8747437" # Hardcoded backup or primary target
 
 def main():
-    with open("config/stations.yml", "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    st = cfg["stations"][0]
-    stid = str(st["id"])
-    station_name = st["name"]
-    datum = st.get("coops_datum", "MLLW")
-    tz = st.get("coops_time_zone", "gmt")
-
-    # The PETSS web UI page uses show=... but we are NOT scraping that page anymore.
-    # This is left here only if you want to keep it in config for reference.
-    # show = st.get("petss_show", "1-1-1-1-0-1-1-1")
-
-    print(f"Fetching PETSS data for station: {stid}")
-
-    raw_text = fetch_petss_table_text(stid)
-    rows = parse_petss_csv_text(raw_text)
-    df = pd.DataFrame(rows)
-
-    # --- Parse time ---
-    # PETSS returns Date(GMT) like "02/10 06Z"
-    # We'll assume CURRENT YEAR in UTC (good enough for rolling runs; we'll harden later).
-    year = _utc_now().year
-
-    # Your parser normalizes header keys; ensure we have the date column
-    # Depending on parse_petss_csv_text, this could be "date(gmt)" or "date_gmt".
-    # Our petss_web_fetch normalizes to "date(gmt)" stripped -> likely "date(gmt)" -> "date(gmt)"? 
-    # You used df["date_gmt"], so enforce it here robustly:
-    if "date_gmt" not in df.columns:
-        # try common variants
-        for candidate in ["date(gmt)", "dategmt", "date"]:
-            if candidate in df.columns:
-                df = df.rename(columns={candidate: "date_gmt"})
-                break
-
-    if "date_gmt" not in df.columns:
-        raise RuntimeError(f"Could not find date column in PETSS response. Columns: {list(df.columns)}")
-
-    # Convert "MM/DD HHZ" -> datetime UTC
-    df["valid_time"] = pd.to_datetime(
-        df["date_gmt"]
-        .astype(str)
-        .str.replace("Z", "", regex=False)
-        .apply(lambda s: f"{year}/{s}"),
-        format="%Y/%m/%d %H",
-        utc=True,
-        errors="coerce",
-    )
-    df = df.dropna(subset=["valid_time"])
-
-    # --- Numeric columns ---
-    # Normalize possible key variations (depends on petss_web_fetch normalization)
-    rename_map = {}
-    if "fcst90" not in df.columns:
-        for c in ["fcst90p", "fcst90", "fcst90percent", "fcst90"]:
-            if c in df.columns:
-                rename_map[c] = "fcst90"
-                break
-    if "fcst10" not in df.columns:
-        for c in ["fcst10p", "fcst10", "fcst10percent", "fcst10"]:
-            if c in df.columns:
-                rename_map[c] = "fcst10"
-                break
-    if rename_map:
-        df = df.rename(columns=rename_map)
-
-    for col in ["surge", "tide", "obs", "fcst", "anom", "fcst90", "fcst10"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # --- Flood thresholds from CO-OPS/MDAPI ---
-    fl = fetch_flood_levels(stid)
-    if fl.minor is None or fl.moderate is None or fl.major is None:
-        raise RuntimeError("Flood thresholds missing from MDAPI (minor/moderate/major).")
-
-    minor_ft, moderate_ft, major_ft = fl.minor, fl.moderate, fl.major
-    print(f"Thresholds ft: minor={minor_ft} moderate={moderate_ft} major={major_ft}")
-
-    # --- Observations (last 6 hours) ---
-    now = _utc_now()
-    begin = now - timedelta(hours=6)
-    obs_json = fetch_recent_water_levels(
-        station_id=stid,
-        begin_date_yyyymmdd=_yyyymmdd(begin),
-        end_date_yyyymmdd=_yyyymmdd(now),
-        datum=datum,
-        time_zone=tz,
-        units="english",
-        interval="6",
-    )
-    obs_df = _coops_obs_to_df(obs_json)
-
-    # --- Bias learning using overlap (fcst - obs) ---
-    bias_path = f"data/bias/{stid}_bias.json"
-    bias_state = load_bias(bias_path)
-
-    if "obs" in df.columns and df["obs"].notna().any() and "fcst" in df.columns:
-        overlap = df[df["obs"].notna() & df["fcst"].notna()].copy()
-        if not overlap.empty:
-            new_error = float((overlap["fcst"] - overlap["obs"]).mean())
-            bias_state = update_bias(bias_state, new_error_ft=new_error)
-
-    # Bias-correct forecast
-    if "fcst" not in df.columns:
-        raise RuntimeError(f"PETSS response missing 'fcst' column. Columns: {list(df.columns)}")
-
-    df["fcst_bc"] = df["fcst"] - bias_state.rolling_bias_ft
-
-    # --- Trend blend from CO-OPS obs slope (last 6h) ---
-    trend_adj = 0.0
-    trend_used = False
-    if len(obs_df) >= 8:
-        x = (obs_df["t"] - obs_df["t"].min()).dt.total_seconds().values
-        y = obs_df["v"].values
-        denom = (x**2).sum()
-        if denom > 0:
-            slope = (x * (y - y.mean())).sum() / denom  # ft per sec
-            slope_hr = slope * 3600.0  # ft per hour
-            trend_adj = float(slope_hr * 6.0)  # project 6h
-            trend_used = True
-
-    # Apply trend blend to near-term (next 12h) only
-    df["fcst_final"] = df["fcst_bc"]
-    horizon = now + timedelta(hours=12)
-    if trend_used and abs(trend_adj) <= 2.0:
-        w = 0.30
-        mask = df["valid_time"] <= horizon
-        df.loc[mask, "fcst_final"] = df.loc[mask, "fcst_bc"] + w * trend_adj
-
-    # --- Peak / headline flags ---
-    peak_fcst = float(df["fcst_final"].max())
-    p_minor = 100.0 if peak_fcst >= minor_ft else 0.0
-    p_mod = 100.0 if peak_fcst >= moderate_ft else 0.0
-    p_maj = 100.0 if peak_fcst >= major_ft else 0.0
-
-    # --- Confidence from spread (fcst90 - fcst10) if available ---
-    if "fcst90" in df.columns and "fcst10" in df.columns and df["fcst90"].notna().any() and df["fcst10"].notna().any():
-        spread = (df["fcst90"] - df["fcst10"]).median()
-        typical_spread = 1.0  # tweak later for local calibration
-        conf = float(max(0.0, min(1.0, 1.0 - (spread / typical_spread))))
+    # 1. Load Configuration
+    if os.path.exists(STATIONS_FILE):
+        with open(STATIONS_FILE, 'r') as f:
+            config = yaml.safe_load(f)
     else:
-        conf = 0.5
+        logger.warning(f"{STATIONS_FILE} not found. Using defaults.")
+        config = {"stations": [{"id": WAVELAND_ID}]}
 
-    # Peak timing
-    peak_row = df.loc[df["fcst_final"].idxmax()]
-    peak_time = peak_row["valid_time"].to_pydatetime().isoformat().replace("+00:00", "Z")
+    # Filter for Waveland (or iterate all if you expand later)
+    target_station = next((s for s in config['stations'] if str(s['id']) == WAVELAND_ID), None)
+    if not target_station:
+        raise ValueError(f"Station {WAVELAND_ID} not found in config.")
 
-    # Recommendation
-    if p_minor == 100.0 and p_mod == 100.0:
-        rec = "Warning Possible"
-    elif p_minor == 100.0:
-        rec = "Advisory Likely"
-    else:
-        rec = "No Headline Suggested"
+    logger.info(f"Starting workflow for {target_station['id']}")
 
-    # Source info (now that we use the hidden endpoint)
-    source = {
-        "endpoint": "https://slosh.nws.noaa.gov/petss/fixed/php/getData.php",
-        "method": "POST",
-        "form": {"st": stid},
-    }
+    # 2. Fetch Flood Thresholds
+    logger.info("Fetching flood levels...")
+    levels = coops_api.fetch_flood_levels(WAVELAND_ID)
+    
+    # Use YAML overrides if API failed or manual override exists
+    if not levels.minor: 
+        levels.minor = 1.6 # Approximate Waveland minor if API missing
+    logger.info(f"Thresholds: Minor={levels.minor}, Mod={levels.moderate}, Major={levels.major}")
 
-    summary = {
-        "station_id": stid,
-        "station_name": station_name,
-        "source": source,
-        "generated_utc": now.isoformat().replace("+00:00", "Z"),
-        "thresholds_ft": {"minor": minor_ft, "moderate": moderate_ft, "major": major_ft},
-        "bias": {
-            "rolling_bias_ft_forecast_minus_obs": bias_state.rolling_bias_ft,
-            "n": bias_state.n,
-            "applied": True,
-        },
-        "trend_blend": {
-            "used": trend_used,
-            "projected_adjustment_ft_6h": trend_adj if trend_used else 0.0,
-            "weight": 0.30 if trend_used else 0.0,
-            "applied_horizon_hours": 12 if trend_used else 0,
-        },
-        "peak_fcst_final_ft": round(peak_fcst, 3),
-        "peak_time_utc": peak_time,
-        "peak_flags_percent": {"minor": p_minor, "moderate": p_mod, "major": p_maj},
-        "confidence_index_0to1": conf,
-        "recommendation": rec,
-    }
+    # 3. Download and Parse PETSS Data
+    logger.info("Finding latest PETSS tarball...")
+    run_ref = petss_web_fetch.find_latest_petss_csv_tar()
+    logger.info(f"Downloading {run_ref.csv_tar_url}...")
+    tar_bytes = petss_web_fetch.download_csv_tarball(run_ref)
+    
+    logger.info("Extracting CSVs...")
+    all_csvs = petss_web_fetch.extract_csvs_from_tarball(tar_bytes)
+    
+    logger.info(f"Parsing series for {WAVELAND_ID}...")
+    # This returns a DataFrame with columns: [station_id, valid_time, member, stormtide_ft]
+    df_petss = coops_fetch.extract_station_series(all_csvs, WAVELAND_ID)
 
-    # Timeseries output (for plotting)
-    ts = {
-        "station_id": stid,
-        "station_name": station_name,
-        "valid_time_utc": [t.to_pydatetime().isoformat().replace("+00:00", "Z") for t in df["valid_time"]],
-        "surge": df["surge"].round(3).tolist() if "surge" in df.columns else [],
-        "tide": df["tide"].round(3).tolist() if "tide" in df.columns else [],
-        "obs": df["obs"].round(3).tolist() if "obs" in df.columns else [],
-        "fcst": df["fcst"].round(3).tolist(),
-        "fcst_final": df["fcst_final"].round(3).tolist(),
-        "fcst90": df["fcst90"].round(3).tolist() if "fcst90" in df.columns else [],
-        "fcst10": df["fcst10"].round(3).tolist() if "fcst10" in df.columns else [],
-    }
+    # 4. Bias Correction
+    # Strategy: Fetch last 24h observed data. Compare most recent observation 
+    # to the PETSS mean at that specific time.
+    bias_path = os.path.join(BIAS_DIR, f"bias_{WAVELAND_ID}.json")
+    bias_state = compute.load_bias(bias_path)
+    
+    now_utc = datetime.now(timezone.utc)
+    yesterday_str = (now_utc - timedelta(days=1)).strftime("%Y%m%d")
+    today_str = now_utc.strftime("%Y%m%d")
+    
+    try:
+        logger.info("Fetching recent observed water levels for bias calculation...")
+        obs_data = coops_api.fetch_recent_water_levels(WAVELAND_ID, yesterday_str, today_str)
+        
+        # Convert observations to DataFrame
+        obs_list = obs_data.get('data', [])
+        if obs_list:
+            df_obs = pd.DataFrame(obs_list)
+            df_obs['t'] = pd.to_datetime(df_obs['t']).dt.tz_localize('UTC') # API returns GMT
+            df_obs['v'] = pd.to_numeric(df_obs['v'], errors='coerce')
+            
+            # Find the latest observation
+            last_obs = df_obs.iloc[-1]
+            last_obs_time = last_obs['t']
+            last_obs_val = last_obs['v']
 
-    os.makedirs("outputs", exist_ok=True)
-    with open("outputs/waveland_summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-    with open("outputs/waveland_timeseries.json", "w", encoding="utf-8") as f:
-        json.dump(ts, f, indent=2)
+            # Find PETSS mean at that time (interpolate or nearest hour)
+            # PETSS is usually hourly. Let's find the nearest hour in PETSS df
+            # Calculate mean of ensemble first
+            df_mean = df_petss.groupby('valid_time')['stormtide_ft'].mean()
+            
+            # Get model value at observation time (using nearest for simplicity)
+            # Ensure indices are timezone aware and compatible
+            idx_loc = df_mean.index.get_indexer([last_obs_time], method='nearest')
+            if idx_loc[0] != -1:
+                model_time = df_mean.index[idx_loc[0]]
+                model_val = df_mean.iloc[idx_loc[0]]
+                
+                # Only update bias if the time difference is small (< 90 mins)
+                if abs((model_time - last_obs_time).total_seconds()) < 5400:
+                    # Bias = Forecast - Observed
+                    # If model is 2.0 and obs is 2.5, Bias is -0.5. 
+                    # Corrected = Forecast - (-0.5) = 2.5. Correct.
+                    current_error = model_val - last_obs_val
+                    
+                    logger.info(f"Updating Bias. Model: {model_val:.2f}, Obs: {last_obs_val:.2f} (diff: {current_error:.2f})")
+                    bias_state = compute.update_bias(bias_state, current_error)
+                    compute.save_bias(bias_path, bias_state)
+                else:
+                    logger.warning("Gap between model and observation too large to update bias.")
+            else:
+                logger.warning("Could not align model time with observation time.")
+    except Exception as e:
+        logger.error(f"Failed to update bias: {e}")
 
-    save_bias(bias_path, bias_state)
-    print("Done. Wrote outputs/waveland_summary.json and outputs/waveland_timeseries.json")
+    # 5. Apply Bias to Forecast
+    logger.info(f"Applying rolling bias: {bias_state.rolling_bias_ft:.2f} ft")
+    df_petss['stormtide_ft'] = df_petss['stormtide_ft'] - bias_state.rolling_bias_ft
 
+    # 6. Compute Exceedance Probabilities
+    # Ensure thresholds are not None
+    t_min = levels.minor if levels.minor else 1.6
+    t_mod = levels.moderate if levels.moderate else 2.5 # Default fallback
+    t_maj = levels.major if levels.major else 4.0     # Default fallback
+
+    stats = coops_fetch.compute_exceedance_probs(df_petss, t_min, t_mod, t_maj)
+
+    # 7. Generate Output
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Save Raw Data
+    output_json = os.path.join(OUTPUT_DIR, "waveland_forecast.json")
+    stats['valid_time_str'] = stats['valid_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    stats.to_json(output_json, orient="records", date_format="iso", indent=2)
+    
+    # Generate Markdown Summary
+    md_path = os.path.join(OUTPUT_DIR, "README.md")
+    
+    start_win, end_win, peak_time = coops_fetch.pick_peak_window(stats, min_prob=30.0)
+    
+    peak_row = stats.loc[stats['mean_ft'].idxmax()]
+    
+    with open(md_path, "w") as f:
+        f.write(f"# Waveland, MS Flood Forecast\n\n")
+        f.write(f"**Updated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n")
+        f.write(f"**Data Source:** PETSS {run_ref.date_dir} Cycle {run_ref.cycle}Z\n")
+        f.write(f"**Bias Applied:** {bias_state.rolling_bias_ft:.2f} ft (n={bias_state.n})\n\n")
+        
+        f.write("## Peak Forecast\n")
+        f.write(f"- **Peak Time:** {peak_row['valid_time_str']}\n")
+        f.write(f"- **Mean Water Level:** {peak_row['mean_ft']:.2f} ft MLLW\n")
+        f.write(f"- **10% - 90% Range:** {peak_row['p10_ft']:.2f} ft to {peak_row['p90_ft']:.2f} ft\n\n")
+        
+        f.write("## Flood Risk Probabilities\n")
+        f.write("| Threshold | Level (ft) | Probability |\n")
+        f.write("| :--- | :--- | :--- |\n")
+        f.write(f"| Minor | {t_min} | {peak_row['p_minor']:.1f}% |\n")
+        f.write(f"| Moderate | {t_mod} | {peak_row['p_moderate']:.1f}% |\n")
+        f.write(f"| Major | {t_maj} | {peak_row['p_major']:.1f}% |\n")
+
+    logger.info("Workflow completed successfully.")
 
 if __name__ == "__main__":
     main()
