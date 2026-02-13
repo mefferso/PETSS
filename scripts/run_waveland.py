@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Config
-STATIONS_FILE = "stations.yml"
+STATIONS_FILE = "config/stations.yml"
 BIAS_DIR = "data/bias"
 OUTPUT_DIR = "outputs"
 # We default to Waveland IDs if config is missing
