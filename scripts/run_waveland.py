@@ -164,3 +164,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+from pathlib import Path
+from datetime import datetime, timezone
+
+Path("outputs").mkdir(parents=True, exist_ok=True)
+Path("outputs/heartbeat.txt").write_text(
+    datetime.now(timezone.utc).isoformat(),
+    encoding="utf-8",
+)
+
+print("Wrote heartbeat.txt")
