@@ -50,7 +50,18 @@ def main():
     csvs = extract_csvs_from_tarball(tar_bytes)
 
     # 2) extract station ensemble series
-    petss_df = extract_station_series(csvs, station_id)
+    try:
+        petss_df = extract_station_series(csvs, station_id)
+    except Exception as e:
+        from scripts.compute import debug_inventory
+        import json
+        inv = debug_inventory(csvs, max_files=10)
+        print("DEBUG: Could not find station in tarball.")
+        print("DEBUG INVENTORY JSON START")
+        print(json.dumps(inv, indent=2))
+        print("DEBUG INVENTORY JSON END")
+        raise
+
 
     # 3) thresholds
     override = st.get("thresholds_override_ft")
