@@ -180,3 +180,30 @@ def pick_peak_window(prob_ts: pd.DataFrame, min_prob: float = 40.0) -> Tuple[Opt
     idx = sel["mean_ft"].idxmax()
     peak = sel.loc[idx, "valid_time"].to_pydatetime().isoformat().replace("+00:00", "Z")
     return start, end, peak
+
+def debug_inventory(all_csvs: Dict[str, bytes], max_files: int = 5) -> Dict:
+    """
+    Returns a quick inventory of CSV files: columns and first few unique station ids (as strings).
+    """
+    inv = {"files": []}
+    count = 0
+    for name, b in all_csvs.items():
+        if count >= max_files:
+            break
+        try:
+            df = _parse_any_petss_csv(b)
+        except Exception as e:
+            inv["files"].append({"name": name, "error": str(e)})
+            count += 1
+            continue
+
+        stations = df["station_id"].astype(str).dropna().unique().tolist()[:10]
+        inv["files"].append({
+            "name": name,
+            "columns": ["station_id", "valid_time", "member", "stormtide_ft", "scaling"],
+            "station_samples": stations,
+            "n_rows": int(df.shape[0]),
+        })
+        count += 1
+    return inv
+
