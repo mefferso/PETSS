@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 import yaml
@@ -45,7 +45,7 @@ def decode_bytes(b: bytes) -> str:
 
 def load_station_cfg(stations_path: Path) -> Dict[str, Any]:
     if not stations_path.exists():
-        raise FileNotFoundError(f"Missing {stations_path}. Expected stations.yml in repo root.")
+        raise FileNotFoundError(f"Missing {stations_path}. Expected stations.yml in repo root or config/.")
 
     cfg = yaml.safe_load(stations_path.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict) or "stations" not in cfg:
@@ -55,8 +55,7 @@ def load_station_cfg(stations_path: Path) -> Dict[str, Any]:
     if not stations:
         raise ValueError("stations.yml has no stations entries.")
 
-    # Waveland-only project: first entry
-    st = stations[0]
+    st = stations[0]  # Waveland-only
     for k in ("id", "petss_id", "name"):
         if k not in st:
             raise ValueError(f"stations.yml missing required field: {k}")
@@ -93,9 +92,9 @@ def coops_recent_df(station_id: str, datum: str, tz: str) -> pd.DataFrame:
 
 def try_filter_petss_for_station(csv_bytes: bytes, petss_id: str) -> Optional[pd.DataFrame]:
     """
-    Best-effort filter for WVLM6 (or other petss_id):
+    Best-effort filter for station:
       - quick string check
-      - parse CSV
+      - parse CSV (assumes comma-delimited)
       - filter by likely station column if present
       - else filter rows where any cell contains petss_id
     """
@@ -131,8 +130,21 @@ def try_filter_petss_for_station(csv_bytes: bytes, petss_id: str) -> Optional[pd
         return None
 
 
+def find_csv_containing_station(csv_map: Dict[str, bytes], petss_id: str) -> Optional[Tuple[str, bytes]]:
+    """
+    Fast deterministic: pick the first CSV in the tarball that literally contains the station ID string.
+    This is what fixes your 'way tf off' issue (wrong station file selected).
+    """
+    needle = petss_id.encode("utf-8")
+    for fname, b in csv_map.items():
+        if needle in b:
+            return fname, b
+    return None
+
+
 def main() -> None:
     repo_root = Path(".").resolve()
+
     stations_path = (
         (repo_root / "stations.yml")
         if (repo_root / "stations.yml").exists()
@@ -188,7 +200,18 @@ def main() -> None:
         p.write_bytes(b)
         raw_files.append(str(p.relative_to(repo_root)))
 
-    # Try to isolate WVLM6 rows
+    # ✅ NEW: write the actual station CSV used for display (contains WVLM6)
+    station_csv_path = out_waveland / "petss_station.csv"
+    station_source_file = None
+    hit = find_csv_containing_station(csv_map, petss_id=petss_id)
+    if hit is not None:
+        station_source_file, station_bytes = hit
+        station_csv_path.write_bytes(station_bytes)
+    else:
+        # still create the file so downstream doesn't blow up
+        station_csv_path.write_text("", encoding="utf-8")
+
+    # Optional: keep the "matches" file too (handy for debugging schema)
     matches = []
     for fname, b in csv_map.items():
         m = try_filter_petss_for_station(b, petss_id=petss_id)
@@ -229,10 +252,16 @@ def main() -> None:
             "cycle": runref.cycle,
             "csv_tar_url": runref.csv_tar_url,
             "raw_csv_count": len(csv_map),
-            "raw_files_written": raw_files[:80],
+            "raw_files_written": raw_files[:120],
             "station_match_csv": str(match_csv_path.relative_to(repo_root)),
             "station_match_rows": match_row_count,
-            "station_match_columns": match_cols[:80],
+            "station_match_columns": match_cols[:120],
+        },
+        # ✅ NEW: definitive station CSV pointer
+        "petss_station_csv": {
+            "path": str(station_csv_path.relative_to(repo_root)),
+            "source_file": station_source_file,
+            "petss_id": petss_id,
         },
     }
 
@@ -241,6 +270,7 @@ def main() -> None:
     print("Wrote outputs:")
     print(f" - {out_waveland / 'latest.json'}")
     print(f" - {obs_csv_path}")
+    print(f" - {station_csv_path}  (source: {station_source_file})")
     print(f" - {match_csv_path}")
     print(f" - raw PETSS csvs under: {raw_dir}")
 
