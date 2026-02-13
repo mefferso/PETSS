@@ -1,52 +1,70 @@
-from __future__ import annotations
+import re
+import io
+import tarfile
+from dataclasses import dataclass
+from typing import Dict
 
 import requests
 
+NOMADS_PETSS_PROD = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/petss/prod/"
 
-PETSS_DATA_URL = "https://slosh.nws.noaa.gov/petss/fixed/php/getData.php"
+@dataclass
+class PetssRunRef:
+    date_dir: str          # e.g. "petss.20260213/"
+    cycle: str             # e.g. "00"
+    csv_tar_url: str       # full URL to petss.t00z.csv.tar.gz
 
-
-def fetch_petss_table_text(station_id: str, timeout: int = 45) -> str:
-    """
-    Directly fetch PETSS hydrograph table text using the internal data endpoint.
-    Returns raw comma-separated text block.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"https://slosh.nws.noaa.gov/petss/index.php?stid={station_id}"
-    }
-
-    r = requests.post(
-        PETSS_DATA_URL,
-        data={"st": station_id},
-        headers=headers,
-        timeout=timeout
-    )
-
+def _list_dir(url: str, timeout: int = 30) -> str:
+    r = requests.get(url, timeout=timeout)
     r.raise_for_status()
+    return r.text
 
-    text = r.text.strip()
+def find_latest_petss_csv_tar() -> PetssRunRef:
+    """
+    Find latest petss.YYYYMMDD directory and the latest cycle tarball inside it.
+    """
+    html = _list_dir(NOMADS_PETSS_PROD)
+    # Regex to find date directories like 'petss.20230101/'
+    dirs = re.findall(r'href="(petss\.(\d{8})/)"', html)
+    if not dirs:
+        raise RuntimeError("No petss.YYYYMMDD/ directories found on NOMADS.")
 
-    if "Date(GMT)" not in text:
-        raise RuntimeError(
-            f"Unexpected PETSS response. First 300 chars:\n{text[:300]}"
-        )
+    # Sort by date (group 2) and pick the latest
+    latest_dir, latest_date = sorted(dirs, key=lambda x: x[1])[-1]
+    day_url = NOMADS_PETSS_PROD + latest_dir
+    day_html = _list_dir(day_url)
 
-    return text
+    # Regex to find tarballs like 'petss.t06z.csv.tar.gz'
+    tars = re.findall(r'href="(petss\.t(\d{2})z\.csv\.tar\.gz)"', day_html)
+    if not tars:
+        raise RuntimeError(f"No petss.t??z.csv.tar.gz found in {day_url}")
 
+    # Sort by cycle (group 2) to pick the latest run of the day
+    tar_name, cycle = sorted(tars, key=lambda x: int(x[1]))[-1]
+    tar_url = day_url + tar_name
 
-def parse_petss_csv_text(raw: str):
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return PetssRunRef(date_dir=latest_dir, cycle=cycle, csv_tar_url=tar_url)
 
-    header = lines[0].split(",")
-    header = [h.strip().lower().replace("%", "").replace(" ", "") for h in header]
+def download_csv_tarball(runref: PetssRunRef, timeout: int = 60) -> bytes:
+    r = requests.get(runref.csv_tar_url, timeout=timeout)
+    r.raise_for_status()
+    return r.content
 
-    rows = []
-    for ln in lines[1:]:
-        parts = [p.strip() for p in ln.split(",")]
-        if len(parts) != len(header):
-            continue
-        rows.append(dict(zip(header, parts)))
-
-    return rows
+def extract_csvs_from_tarball(tar_bytes: bytes) -> Dict[str, bytes]:
+    """
+    Returns dict of {filename: file_bytes} for each CSV member of tar.gz
+    """
+    out: Dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tf:
+        for member in tf.getmembers():
+            if not member.isfile():
+                continue
+            if not member.name.lower().endswith(".csv"):
+                continue
+            f = tf.extractfile(member)
+            if f is None:
+                continue
+            out[member.name] = f.read()
+    if not out:
+        raise RuntimeError("Tarball contained no CSV files.")
+    return out
