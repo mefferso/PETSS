@@ -15,11 +15,12 @@ from scripts import compute
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Config
-STATIONS_FILE = "config/stations.yml"
+# --- CONFIGURATION UPDATE ---
+# CRITICAL FIX: Pointing to the file inside the config/ folder
+STATIONS_FILE = "config/stations.yml" 
 BIAS_DIR = "data/bias"
 OUTPUT_DIR = "outputs"
-# We default to Waveland IDs if config is missing
+
 DEFAULT_COOPS_ID = "8747437"
 DEFAULT_PETSS_ID = "WVLM6"
 
@@ -28,31 +29,34 @@ def main():
     if os.path.exists(STATIONS_FILE):
         with open(STATIONS_FILE, 'r') as f:
             config = yaml.safe_load(f)
+        logger.info(f"Loaded configuration from {STATIONS_FILE}")
     else:
-        logger.warning(f"{STATIONS_FILE} not found. Using defaults.")
-        config = {"stations": [{"id": DEFAULT_COOPS_ID, "petss_id": DEFAULT_PETSS_ID}]}
+        # Check if it exists in root just in case, otherwise use defaults
+        if os.path.exists("stations.yml"):
+             with open("stations.yml", 'r') as f:
+                config = yaml.safe_load(f)
+             logger.info("Loaded configuration from stations.yml (root)")
+        else:
+            logger.warning(f"Config file not found at {STATIONS_FILE}. Using defaults.")
+            config = {"stations": [{"id": DEFAULT_COOPS_ID, "petss_id": DEFAULT_PETSS_ID}]}
 
     # Find configuration for our target station
     station_cfg = next((s for s in config['stations'] if str(s['id']) == DEFAULT_COOPS_ID), None)
     if not station_cfg:
-        # Fallback if the specific ID isn't in the YAML
         station_cfg = {"id": DEFAULT_COOPS_ID, "petss_id": DEFAULT_PETSS_ID}
     
     coops_id = str(station_cfg['id'])
-    # Use petss_id if it exists, otherwise fallback to coops_id
     petss_id = str(station_cfg.get('petss_id', coops_id))
 
     logger.info(f"Starting workflow for CO-OPS: {coops_id} | PETSS: {petss_id}")
 
-    # 2. Fetch Flood Thresholds (Uses CO-OPS Numeric ID)
+    # 2. Fetch Flood Thresholds
     logger.info("Fetching flood levels...")
     levels = coops_api.fetch_flood_levels(coops_id)
-    
-    if not levels.minor: 
-        levels.minor = 1.6 
+    if not levels.minor: levels.minor = 1.6 
     logger.info(f"Thresholds: Minor={levels.minor}, Mod={levels.moderate}, Major={levels.major}")
 
-    # 3. Download and Parse PETSS Data (Uses NWS String ID)
+    # 3. Download and Parse PETSS Data
     logger.info("Finding latest PETSS tarball...")
     run_ref = petss_web_fetch.find_latest_petss_csv_tar()
     logger.info(f"Downloading {run_ref.csv_tar_url}...")
@@ -62,17 +66,15 @@ def main():
     all_csvs = petss_web_fetch.extract_csvs_from_tarball(tar_bytes)
     
     logger.info(f"Parsing series for PETSS ID: {petss_id}...")
-    # HERE IS THE FIX: We use petss_id, not the numeric ID
     df_petss = coops_fetch.extract_station_series(all_csvs, petss_id)
 
     if df_petss.empty:
-        logger.error(f"No data found for station {petss_id} in any downloaded CSV.")
-        logger.error("Check station ID mapping or PETSS availability.")
-        return # Exit gracefully
+        logger.error(f"No data found for station {petss_id}. Check ID mapping.")
+        return 
     
     logger.info(f"Found {len(df_petss)} data points.")
 
-    # 4. Bias Correction (Uses CO-OPS Observed Data)
+    # 4. Bias Correction
     bias_path = os.path.join(BIAS_DIR, f"bias_{coops_id}.json")
     bias_state = compute.load_bias(bias_path)
     
@@ -106,10 +108,8 @@ def main():
                     logger.info(f"Updating Bias. Model: {model_val:.2f}, Obs: {last_obs_val:.2f} (diff: {current_error:.2f})")
                     bias_state = compute.update_bias(bias_state, current_error)
                     compute.save_bias(bias_path, bias_state)
-                else:
-                    logger.warning("Gap between model and observation too large to update bias.")
     except Exception as e:
-        logger.error(f"Bias update failed (continuing without update): {e}")
+        logger.error(f"Bias update failed: {e}")
 
     # 5. Apply Bias
     logger.info(f"Applying rolling bias: {bias_state.rolling_bias_ft:.2f} ft")
@@ -134,7 +134,6 @@ def main():
     stats.to_json(output_json, orient="records", date_format="iso", indent=2)
     
     md_path = os.path.join(OUTPUT_DIR, "README.md")
-    
     start_win, end_win, peak_time = coops_fetch.pick_peak_window(stats, min_prob=30.0)
     
     if not peak_time:
