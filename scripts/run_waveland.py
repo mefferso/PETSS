@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-# Prefer package-relative imports (correct for `python -m scripts.run_waveland`)
-try:
-    from .coops_api import fetch_flood_levels, fetch_recent_water_levels
-    from .petss_fetch import (
-        find_latest_petss_csv_tar,
-        download_csv_tarball,
-        extract_csvs_from_tarball,
-    )
+from .coops_api import fetch_flood_levels, fetch_recent_water_levels
+from .petss_fetch import (
+    find_latest_petss_csv_tar,
+    download_csv_tarball,
+    extract_csvs_from_tarball,
+)
+
 except Exception:
     # Fallback if you ever move modules to repo root
     from coops_api import fetch_flood_levels, fetch_recent_water_levels
