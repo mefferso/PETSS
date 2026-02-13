@@ -45,10 +45,9 @@ def main():
     # IMPORTANT: this is your page parameter
     show = st.get("petss_show", "1-1-1-1-0-1-1-1")
 
-    url = build_petss_url(stid=stid, datum=datum, show=show)
     print(f"Fetching PETSS page: {url}")
 
-    raw_text = fetch_petss_table_text(station_id)
+    raw_text = fetch_petss_table_text(stid)
     rows = parse_petss_csv_text(raw_text)
 
     df = pd.DataFrame(rows)
