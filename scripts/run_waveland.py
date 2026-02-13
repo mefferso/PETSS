@@ -62,6 +62,7 @@ def main():
     all_csvs = petss_web_fetch.extract_csvs_from_tarball(tar_bytes)
     
     logger.info(f"Parsing series for PETSS ID: {petss_id}...")
+    # HERE IS THE FIX: We use petss_id, not the numeric ID
     df_petss = coops_fetch.extract_station_series(all_csvs, petss_id)
 
     if df_petss.empty:
