@@ -1,0 +1,38 @@
+name: PETSS Waveland Coastal Flood Intel
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 */3 * * *"  # every 3 hours at :15
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run engine
+        run: |
+          python scripts/run_waveland.py
+
+      - name: Commit outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs data/bias
+          git commit -m "Update Waveland PETSS coastal intel" || echo "No changes to commit"
+          git push
