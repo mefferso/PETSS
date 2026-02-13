@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 
 import pandas as pd
 
@@ -17,7 +17,6 @@ class StationOutputs:
 def _parse_any_petss_csv(csv_bytes: bytes) -> pd.DataFrame:
     """
     We don't assume exact PETSS CSV schema; we load with pandas and normalize columns.
-    Must produce at least: station_id, valid_time, member, stormtide_ft
     """
     # best effort decode
     text = csv_bytes.decode("utf-8", errors="replace")
@@ -65,7 +64,6 @@ def _parse_any_petss_csv(csv_bytes: bytes) -> pd.DataFrame:
     if val_col is None:
         # last resort: pick first numeric column not matching common metadata
         numeric_cols = [c for c in df.columns if c not in {st_col, vt_col, mem_col}]
-        # pick one that looks numeric
         for c in numeric_cols:
             if pd.api.types.is_numeric_dtype(df[c]):
                 val_col = c
@@ -91,7 +89,7 @@ def _parse_any_petss_csv(csv_bytes: bytes) -> pd.DataFrame:
     out["stormtide_raw"] = pd.to_numeric(out["stormtide_raw"], errors="coerce")
     out = out.dropna(subset=["stormtide_raw"])
 
-    # Detect tenths-of-feet scaling: if most values are integer-ish and abs max > 20, probably tenths.
+    # Detect tenths-of-feet scaling
     vals = out["stormtide_raw"].values
     if len(vals) > 0:
         is_intish = (abs(vals - vals.round()) < 1e-6).mean() > 0.8
@@ -125,8 +123,8 @@ def extract_station_series(all_csvs: Dict[str, bytes], station_id: str) -> pd.Da
             frames.append(sub)
 
     if not frames:
-        # Fallback empty dataframe if nothing found, to prevent crash
-        return pd.DataFrame(columns=["station_id", "valid_time", "member", "stormtide_ft"])
+        # Return empty DF with expected columns to prevent KeyErrors downstream
+        return pd.DataFrame(columns=["station_id", "valid_time", "member", "stormtide_ft", "source_csv"])
 
     out = pd.concat(frames, ignore_index=True)
     out = out.sort_values("valid_time")
@@ -142,8 +140,11 @@ def compute_exceedance_probs(
     """
     Returns hourly time series with probabilities (0-100) for each threshold.
     """
+    # Expected output columns
+    cols = ["valid_time", "p_minor", "p_moderate", "p_major", "mean_ft", "p10_ft", "p90_ft", "n_members"]
+    
     if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=cols)
 
     # group by valid_time, compute exceedance fraction by member
     def prob_exceed(group: pd.DataFrame, thr: float) -> float:
@@ -175,6 +176,9 @@ def pick_peak_window(prob_ts: pd.DataFrame, min_prob: float = 40.0) -> Tuple[Opt
     mask = prob_ts["p_minor"] >= min_prob
     if not mask.any():
         # fallback: peak at max mean
+        if prob_ts["mean_ft"].isna().all():
+             return None, None, None
+             
         idx = prob_ts["mean_ft"].idxmax()
         peak = prob_ts.loc[idx, "valid_time"].to_pydatetime().isoformat().replace("+00:00", "Z")
         return None, None, peak
