@@ -3,7 +3,7 @@ name: PETSS Waveland Coastal Flood Intel
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 */3 * * *"  # every 3 hours at :15
+    - cron: "15 */3 * * *"
 
 permissions:
   contents: write
@@ -27,7 +27,6 @@ jobs:
 
       - name: Run engine
         run: |
-          # Ensure scripts is treated as a module
           python -m scripts.run_waveland
 
       - name: Commit outputs
@@ -35,14 +34,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Add directories if they exist
-          git add outputs/* || true
-          git add data/bias/* || true
+          # Add output files if they exist
+          if [ -d "outputs" ]; then git add outputs/*; fi
+          if [ -d "data/bias" ]; then git add data/bias/*; fi
           
-          # Only commit if there are changes
-          if [[ -n $(git status -s) ]]; then
+          # Commit only if changes exist
+          if ! git diff --cached --quiet; then
             git commit -m "Update Waveland PETSS coastal intel [skip ci]"
             git push
           else
-            echo "No changes to commit"
+            echo "No changes to commit."
           fi
