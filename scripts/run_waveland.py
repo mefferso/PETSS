@@ -133,7 +133,11 @@ def try_filter_petss_for_station(csv_bytes: bytes, petss_id: str) -> Optional[pd
 
 def main() -> None:
     repo_root = Path(".").resolve()
-    stations_path = repo_root / "stations.yml"
+    stations_path = (
+        (repo_root / "stations.yml")
+        if (repo_root / "stations.yml").exists()
+        else (repo_root / "config" / "stations.yml")
+    )
 
     station = load_station_cfg(stations_path)
     coops_id = str(station["id"])
