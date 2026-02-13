@@ -17,19 +17,14 @@ class FloodLevelsFt:
 
 
 def fetch_flood_levels(station_id: str, timeout: int = 30) -> FloodLevelsFt:
-    """
-    MDAPI supports flood level thresholds; endpoint available as .xml and .json.
-    """
     url = f"{COOPS_MDAPI}/stations/{station_id}/floodlevels.json"
     try:
         r = requests.get(url, timeout=timeout)
         r.raise_for_status()
         j = r.json()
     except Exception:
-        # Fallback if API fails or station has no thresholds defined
         return FloodLevelsFt(None, None, None)
 
-    # MDAPI floodlevels JSON structure can vary slightly; handle a couple common patterns.
     node = j.get("floodLevel", j)
 
     def _to_float(x):
@@ -55,10 +50,6 @@ def fetch_recent_water_levels(
     interval: str = "6",
     timeout: int = 30,
 ) -> Dict:
-    """
-    CO-OPS Data API water_level product.
-    Returns JSON with time series.
-    """
     params = {
         "product": "water_level",
         "application": "coastal-flood-intel",
