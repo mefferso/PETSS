@@ -42,35 +42,68 @@ def main():
     datum = st.get("coops_datum", "MLLW")
     tz = st.get("coops_time_zone", "gmt")
 
-    # IMPORTANT: this is your page parameter
-    show = st.get("petss_show", "1-1-1-1-0-1-1-1")
+    # The PETSS web UI page uses show=... but we are NOT scraping that page anymore.
+    # This is left here only if you want to keep it in config for reference.
+    # show = st.get("petss_show", "1-1-1-1-0-1-1-1")
 
-    print(f"Fetching PETSS page: {url}")
+    print(f"Fetching PETSS data for station: {stid}")
 
     raw_text = fetch_petss_table_text(stid)
     rows = parse_petss_csv_text(raw_text)
-
     df = pd.DataFrame(rows)
 
-    # Parse date like: 02/10 06Z, 02/10 07Z, ...
-    # We'll assume CURRENT YEAR from system UTC if not provided.
+    # --- Parse time ---
+    # PETSS returns Date(GMT) like "02/10 06Z"
+    # We'll assume CURRENT YEAR in UTC (good enough for rolling runs; we'll harden later).
     year = _utc_now().year
-    # Convert to datetime (UTC)
-    # Format is "MM/DD HHZ"
+
+    # Your parser normalizes header keys; ensure we have the date column
+    # Depending on parse_petss_csv_text, this could be "date(gmt)" or "date_gmt".
+    # Our petss_web_fetch normalizes to "date(gmt)" stripped -> likely "date(gmt)" -> "date(gmt)"? 
+    # You used df["date_gmt"], so enforce it here robustly:
+    if "date_gmt" not in df.columns:
+        # try common variants
+        for candidate in ["date(gmt)", "dategmt", "date"]:
+            if candidate in df.columns:
+                df = df.rename(columns={candidate: "date_gmt"})
+                break
+
+    if "date_gmt" not in df.columns:
+        raise RuntimeError(f"Could not find date column in PETSS response. Columns: {list(df.columns)}")
+
+    # Convert "MM/DD HHZ" -> datetime UTC
     df["valid_time"] = pd.to_datetime(
-        df["date_gmt"].astype(str).str.replace("Z", "", regex=False).apply(lambda s: f"{year}/{s}"),
+        df["date_gmt"]
+        .astype(str)
+        .str.replace("Z", "", regex=False)
+        .apply(lambda s: f"{year}/{s}"),
         format="%Y/%m/%d %H",
         utc=True,
         errors="coerce",
     )
     df = df.dropna(subset=["valid_time"])
 
-    # Numeric columns
+    # --- Numeric columns ---
+    # Normalize possible key variations (depends on petss_web_fetch normalization)
+    rename_map = {}
+    if "fcst90" not in df.columns:
+        for c in ["fcst90p", "fcst90", "fcst90percent", "fcst90"]:
+            if c in df.columns:
+                rename_map[c] = "fcst90"
+                break
+    if "fcst10" not in df.columns:
+        for c in ["fcst10p", "fcst10", "fcst10percent", "fcst10"]:
+            if c in df.columns:
+                rename_map[c] = "fcst10"
+                break
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
     for col in ["surge", "tide", "obs", "fcst", "anom", "fcst90", "fcst10"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Thresholds from MDAPI
+    # --- Flood thresholds from CO-OPS/MDAPI ---
     fl = fetch_flood_levels(stid)
     if fl.minor is None or fl.moderate is None or fl.major is None:
         raise RuntimeError("Flood thresholds missing from MDAPI (minor/moderate/major).")
@@ -78,7 +111,7 @@ def main():
     minor_ft, moderate_ft, major_ft = fl.minor, fl.moderate, fl.major
     print(f"Thresholds ft: minor={minor_ft} moderate={moderate_ft} major={major_ft}")
 
-    # Observations (last 6 hours)
+    # --- Observations (last 6 hours) ---
     now = _utc_now()
     begin = now - timedelta(hours=6)
     obs_json = fetch_recent_water_levels(
@@ -92,21 +125,23 @@ def main():
     )
     obs_df = _coops_obs_to_df(obs_json)
 
-    # Bias learning using overlap (fcst - obs)
+    # --- Bias learning using overlap (fcst - obs) ---
     bias_path = f"data/bias/{stid}_bias.json"
     bias_state = load_bias(bias_path)
 
-    # Use only rows where obs exists on the PETSS table
-    if "obs" in df.columns and df["obs"].notna().any():
-        overlap = df[df["obs"].notna()].copy()
-        # error = forecast - observed
-        new_error = float((overlap["fcst"] - overlap["obs"]).mean())
-        bias_state = update_bias(bias_state, new_error_ft=new_error)
+    if "obs" in df.columns and df["obs"].notna().any() and "fcst" in df.columns:
+        overlap = df[df["obs"].notna() & df["fcst"].notna()].copy()
+        if not overlap.empty:
+            new_error = float((overlap["fcst"] - overlap["obs"]).mean())
+            bias_state = update_bias(bias_state, new_error_ft=new_error)
 
     # Bias-correct forecast
+    if "fcst" not in df.columns:
+        raise RuntimeError(f"PETSS response missing 'fcst' column. Columns: {list(df.columns)}")
+
     df["fcst_bc"] = df["fcst"] - bias_state.rolling_bias_ft
 
-    # Trend blend: simple slope from CO-OPS obs last 6h
+    # --- Trend blend from CO-OPS obs slope (last 6h) ---
     trend_adj = 0.0
     trend_used = False
     if len(obs_df) >= 8:
@@ -127,20 +162,16 @@ def main():
         mask = df["valid_time"] <= horizon
         df.loc[mask, "fcst_final"] = df.loc[mask, "fcst_bc"] + w * trend_adj
 
-    # Probabilities (binary, since we only have mean + percentiles)
-    def peak_probs(series: pd.Series, thr: float) -> float:
-        return 100.0 if float(series.max()) >= thr else 0.0
-
+    # --- Peak / headline flags ---
     peak_fcst = float(df["fcst_final"].max())
     p_minor = 100.0 if peak_fcst >= minor_ft else 0.0
     p_mod = 100.0 if peak_fcst >= moderate_ft else 0.0
     p_maj = 100.0 if peak_fcst >= major_ft else 0.0
 
-    # Confidence from spread (fcst90 - fcst10) if available
-    conf = None
-    if "fcst90" in df.columns and "fcst10" in df.columns:
+    # --- Confidence from spread (fcst90 - fcst10) if available ---
+    if "fcst90" in df.columns and "fcst10" in df.columns and df["fcst90"].notna().any() and df["fcst10"].notna().any():
         spread = (df["fcst90"] - df["fcst10"]).median()
-        typical_spread = 1.0  # tweak later
+        typical_spread = 1.0  # tweak later for local calibration
         conf = float(max(0.0, min(1.0, 1.0 - (spread / typical_spread))))
     else:
         conf = 0.5
@@ -157,10 +188,17 @@ def main():
     else:
         rec = "No Headline Suggested"
 
+    # Source info (now that we use the hidden endpoint)
+    source = {
+        "endpoint": "https://slosh.nws.noaa.gov/petss/fixed/php/getData.php",
+        "method": "POST",
+        "form": {"st": stid},
+    }
+
     summary = {
         "station_id": stid,
         "station_name": station_name,
-        "source_url": url,
+        "source": source,
         "generated_utc": now.isoformat().replace("+00:00", "Z"),
         "thresholds_ft": {"minor": minor_ft, "moderate": moderate_ft, "major": major_ft},
         "bias": {
@@ -189,7 +227,7 @@ def main():
         "surge": df["surge"].round(3).tolist() if "surge" in df.columns else [],
         "tide": df["tide"].round(3).tolist() if "tide" in df.columns else [],
         "obs": df["obs"].round(3).tolist() if "obs" in df.columns else [],
-        "fcst": df["fcst"].round(3).tolist() if "fcst" in df.columns else [],
+        "fcst": df["fcst"].round(3).tolist(),
         "fcst_final": df["fcst_final"].round(3).tolist(),
         "fcst90": df["fcst90"].round(3).tolist() if "fcst90" in df.columns else [],
         "fcst10": df["fcst10"].round(3).tolist() if "fcst10" in df.columns else [],
