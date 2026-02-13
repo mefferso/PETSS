@@ -27,7 +27,7 @@ jobs:
 
       - name: Run engine
         run: |
-          python scripts/run_waveland.py
+          python -m scripts.run_waveland
 
       - name: Commit outputs
         run: |
