@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class BiasState:
+    # bias means: (forecast - observed) in feet
+    # so to correct forecast -> forecast_corrected = forecast - bias
+    rolling_bias_ft: float = 0.0
+    n: int = 0
+
+
+def load_bias(path: str) -> BiasState:
+    if not os.path.exists(path):
+        return BiasState()
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+    return BiasState(
+        rolling_bias_ft=float(j.get("rolling_bias_ft", 0.0)),
+        n=int(j.get("n", 0)),
+    )
+
+
+def save_bias(path: str, state: BiasState) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"rolling_bias_ft": state.rolling_bias_ft, "n": state.n}, f, indent=2)
+
+
+def update_bias(state: BiasState, new_error_ft: float, max_n: int = 60) -> BiasState:
+    """
+    Simple capped rolling mean:
+      error = (forecast - observed) over a recent verification window
+    """
+    n = min(state.n + 1, max_n)
+    # exponential-ish smoothing once capped
+    if state.n < max_n:
+        rolling = (state.rolling_bias_ft * state.n + new_error_ft) / n
+    else:
+        alpha = 1.0 / max_n
+        rolling = (1 - alpha) * state.rolling_bias_ft + alpha * new_error_ft
+    return BiasState(rolling_bias_ft=float(rolling), n=int(n))
