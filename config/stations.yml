@@ -1,6 +1,9 @@
 stations:
   - id: "8747437"
     name: "Waveland, MS (Bay Waveland Yacht Club)"
-    coops_datum: "MLLW"
+    # PETSS station files are in tenths of feet in some text products; the CSV tarball may be feet already.
+    # Our parser will detect scaling if needed (see scripts/compute.py).
+    coops_datum: "MLLW"        # for observations; change if you want another datum
     coops_time_zone: "gmt"
+    # Optional: if you want to override thresholds manually, set these. Otherwise we pull from MDAPI.
     thresholds_override_ft: null
