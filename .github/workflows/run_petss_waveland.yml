@@ -11,6 +11,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,11 +24,20 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
 
       - name: Run engine
         run: |
-          python scripts/run_waveland.py
+          python -m scripts.run_waveland
+
+      - name: Debug - list outputs + git status
+        run: |
+          echo "=== outputs files ==="
+          if [ -d outputs ]; then find outputs -type f -maxdepth 6 -print; else echo "outputs/ missing"; fi
+          echo "=== data/bias files ==="
+          if [ -d data/bias ]; then find data/bias -type f -maxdepth 6 -print; else echo "data/bias missing"; fi
+          echo "=== git status ==="
+          git status --porcelain || true
 
       - name: Commit outputs
         run: |
@@ -43,4 +53,3 @@ jobs:
           else
             echo "No changes to commit."
           fi
-
