@@ -33,15 +33,14 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Add output files if they exist
-          if [ -d "outputs" ]; then git add outputs/*; fi
-          if [ -d "data/bias" ]; then git add data/bias/*; fi
-          
-          # Commit only if changes exist
+
+          if [ -d "outputs" ]; then git add -A outputs; fi
+          if [ -d "data/bias" ]; then git add -A data/bias; fi
+
           if ! git diff --cached --quiet; then
             git commit -m "Update Waveland PETSS coastal intel [skip ci]"
             git push
           else
             echo "No changes to commit."
           fi
+
