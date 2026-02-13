@@ -10,7 +10,7 @@ import yaml
 
 from scripts.coops_fetch import fetch_flood_levels, fetch_recent_water_levels
 from scripts.bias import load_bias, save_bias, update_bias
-from scripts.petss_web_fetch import build_petss_url, fetch_petss_table_text, parse_petss_csv_text
+from scripts.petss_web_fetch import fetch_petss_table_text, parse_petss_csv_text
 
 
 def _utc_now():
