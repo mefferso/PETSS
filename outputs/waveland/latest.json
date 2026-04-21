@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-04-21T08:11:05.804635+00:00",
+  "generated_utc": "2026-04-21T10:45:30.038441+00:00",
   "station": {
     "name": "Waveland, MS (Bay Waveland Yacht Club)",
     "coops_id": "8747437",
@@ -13,8 +13,8 @@
     "major": 8.06
   },
   "coops_recent": {
-    "last_value_ft": -0.105,
-    "last_time_utc": "2026-04-21 08:00:00+00:00",
+    "last_value_ft": 0.358,
+    "last_time_utc": "2026-04-21 10:36:00+00:00",
     "max_last_48h_ft": 3.307,
     "csv_path": "outputs/waveland/coops_recent.csv"
   },
